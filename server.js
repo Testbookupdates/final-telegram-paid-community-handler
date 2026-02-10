@@ -80,13 +80,67 @@ async function createTelegramLink(transactionId) {
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
+// app.post("/create-invite", async (req, res) => {
+//   const apiKey = req.header("x-api-key");
+//   const { userId, telegramUserId, transactionId } = req.body;
+
+//   if (apiKey !== STORE_API_KEY) return res.sendStatus(401);
+//   if (!userId || !telegramUserId || !transactionId)
+//     return res.sendStatus(400);
+
+//   try {
+//     const inviteLink = await createTelegramLink(transactionId);
+
+//     const inviteHash = crypto
+//       .createHash("sha256")
+//       .update(inviteLink)
+//       .digest("hex");
+
+//     const batch = db.batch();
+
+//     batch.set(db.collection(COL_TXN).doc(transactionId), {
+//       userId,
+//       telegramUserId,
+//       transactionId,
+//       inviteHash,
+//       inviteLink,
+//       joined: false,
+//       createdAt: FieldValue.serverTimestamp(),
+//     });
+
+//     batch.set(db.collection(COL_INV).doc(inviteHash), {
+//       userId,
+//       telegramUserId,
+//       transactionId,
+//       inviteLink,
+//       createdAt: FieldValue.serverTimestamp(),
+//     });
+
+//     await batch.commit();
+
+//     await fireWebEngage(
+//       userId,
+//       "pass_paid_community_telegram_link_created",
+//       {
+//         transactionId,
+//         inviteLink,
+//       }
+//     );
+
+//     res.json({ ok: true, inviteLink });
+//   } catch (err) {
+//     trace("ERROR", err.message);
+//     res.status(500).json({ ok: false });
+//   }
+// });
+
+
 app.post("/create-invite", async (req, res) => {
   const apiKey = req.header("x-api-key");
   const { userId, telegramUserId, transactionId } = req.body;
 
   if (apiKey !== STORE_API_KEY) return res.sendStatus(401);
-  if (!userId || !telegramUserId || !transactionId)
-    return res.sendStatus(400);
+  if (!userId || !transactionId) return res.sendStatus(400);
 
   try {
     const inviteLink = await createTelegramLink(transactionId);
@@ -100,7 +154,7 @@ app.post("/create-invite", async (req, res) => {
 
     batch.set(db.collection(COL_TXN).doc(transactionId), {
       userId,
-      telegramUserId,
+      telegramUserId: telegramUserId || null,
       transactionId,
       inviteHash,
       inviteLink,
@@ -110,7 +164,7 @@ app.post("/create-invite", async (req, res) => {
 
     batch.set(db.collection(COL_INV).doc(inviteHash), {
       userId,
-      telegramUserId,
+      telegramUserId: telegramUserId || null,
       transactionId,
       inviteLink,
       createdAt: FieldValue.serverTimestamp(),
