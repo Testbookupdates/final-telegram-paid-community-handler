@@ -31,13 +31,9 @@ const trace = (tag, msg, data = null) => {
 };
 
 async function fireWebEngage(userId, eventName, eventData) {
-  const url = `https://api.webengage.com/v1/accounts/${WEBENGAGE_LICENSE_CODE}/events`;
+  trace("WEBENGAGE", "Firing event", { userId, eventName });
 
-  const payload = {
-    userId: String(userId),
-    eventName,
-    eventData,
-  };
+  const url = `https://api.webengage.com/v1/accounts/${WEBENGAGE_LICENSE_CODE}/events`;
 
   try {
     const res = await fetch(url, {
@@ -46,7 +42,11 @@ async function fireWebEngage(userId, eventName, eventData) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${WEBENGAGE_API_KEY}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        userId: String(userId),
+        eventName,
+        eventData,
+      }),
     });
 
     const body = await res.text();
@@ -59,6 +59,8 @@ async function fireWebEngage(userId, eventName, eventData) {
 }
 
 async function createTelegramLink(transactionId) {
+  trace("TELEGRAM", "Creating invite link", { transactionId });
+
   const res = await fetch(
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/createChatInviteLink`,
     {
@@ -67,26 +69,39 @@ async function createTelegramLink(transactionId) {
       body: JSON.stringify({
         chat_id: TELEGRAM_CHANNEL_ID,
         member_limit: 1,
-        expire_date: Math.floor(Date.now() / 1000) + 48 * 60 * 60,
+        expire_date: Math.floor(Date.now() / 1000) + 172800,
         name: `TXN:${transactionId}`.slice(0, 255),
       }),
     }
   );
 
   const data = await res.json();
-  if (!data.ok) throw new Error(data.description);
+  if (!data.ok) {
+    trace("TELEGRAM", "Invite creation failed", data);
+    throw new Error(data.description);
+  }
+
+  trace("TELEGRAM", "Invite created");
   return data.result.invite_link;
 }
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
-/* ---------- CREATE INVITE (UPDATED) ---------- */
 app.post("/create-invite", async (req, res) => {
+  trace("API", "create-invite called", req.body);
+
   const apiKey = req.header("x-api-key");
   const { userId, telegramUserId, transactionId } = req.body;
 
-  if (apiKey !== STORE_API_KEY) return res.sendStatus(401);
-  if (!userId || !transactionId) return res.sendStatus(400);
+  if (apiKey !== STORE_API_KEY) {
+    trace("AUTH", "Invalid API key");
+    return res.sendStatus(401);
+  }
+
+  if (!userId || !transactionId) {
+    trace("API", "Missing required fields", { userId, transactionId });
+    return res.sendStatus(400);
+  }
 
   try {
     const inviteLink = await createTelegramLink(transactionId);
@@ -95,6 +110,8 @@ app.post("/create-invite", async (req, res) => {
       .createHash("sha256")
       .update(inviteLink)
       .digest("hex");
+
+    trace("API", "Storing invite", { transactionId, inviteHash });
 
     const batch = db.batch();
 
@@ -117,61 +134,102 @@ app.post("/create-invite", async (req, res) => {
     });
 
     await batch.commit();
+    trace("DB", "Invite stored successfully", { transactionId });
 
     await fireWebEngage(
       userId,
       "pass_paid_community_telegram_link_created",
-      {
-        transactionId,
-        inviteLink,
-      }
+      { transactionId, inviteLink }
     );
 
     res.json({ ok: true, inviteLink });
   } catch (err) {
-    trace("ERROR", err.message);
+    trace("ERROR", "create-invite failed", err.message);
     res.status(500).json({ ok: false });
   }
 });
 
-/* ---------- TELEGRAM JOIN WEBHOOK (UNCHANGED) ---------- */
 app.post("/telegram-webhook", async (req, res) => {
-  if (FIRE_JOIN_EVENT !== "true") return res.send("ignored");
+  trace("WEBHOOK", "Received Telegram webhook");
+
+  if (FIRE_JOIN_EVENT !== "true") {
+    trace("WEBHOOK", "Join events disabled");
+    return res.send("ignored");
+  }
 
   const cm = req.body.chat_member || req.body.my_chat_member;
-  if (!cm) return res.send("ignored");
+  if (!cm) {
+    trace("WEBHOOK", "No chat_member payload");
+    return res.send("ignored");
+  }
 
   const inviteLink = cm?.invite_link?.invite_link;
   const status = cm?.new_chat_member?.status;
+  const joinedTelegramUserId = cm?.new_chat_member?.user?.id;
 
-  if (!inviteLink || !["member", "administrator", "creator"].includes(status))
+  trace("WEBHOOK", "Parsed join", {
+    status,
+    joinedTelegramUserId,
+    hasInvite: !!inviteLink,
+  });
+
+  if (
+    !inviteLink ||
+    !joinedTelegramUserId ||
+    !["member", "administrator", "creator"].includes(status)
+  ) {
     return res.send("ignored");
+  }
 
   const inviteHash = crypto
     .createHash("sha256")
     .update(inviteLink)
     .digest("hex");
 
-  const snap = await db.collection(COL_INV).doc(inviteHash).get();
-  if (!snap.exists) return res.send("not_found");
+  const inviteRef = db.collection(COL_INV).doc(inviteHash);
+  const inviteSnap = await inviteRef.get();
 
-  const { transactionId, userId, telegramUserId } = snap.data();
+  if (!inviteSnap.exists) {
+    trace("WEBHOOK", "Invite hash not found", inviteHash);
+    return res.send("not_found");
+  }
+
+  const { transactionId, userId } = inviteSnap.data();
   const txnRef = db.collection(COL_TXN).doc(transactionId);
 
   let fire = false;
 
   await db.runTransaction(async (t) => {
-    const s = await t.get(txnRef);
-    if (s.exists && !s.data().joined) {
-      t.update(txnRef, {
+    const txnSnap = await t.get(txnRef);
+    if (!txnSnap.exists) {
+      trace("TXN", "Transaction doc missing", transactionId);
+      return;
+    }
+
+    const txnData = txnSnap.data();
+
+    if (!txnData.joined) {
+      const update = {
         joined: true,
         joinedAt: FieldValue.serverTimestamp(),
-      });
+      };
+
+      if (!txnData.telegramUserId) {
+        update.telegramUserId = joinedTelegramUserId;
+        t.update(inviteRef, { telegramUserId: joinedTelegramUserId });
+        trace("TXN", "Stored telegramUserId", joinedTelegramUserId);
+      }
+
+      t.update(txnRef, update);
       fire = true;
+    } else {
+      trace("TXN", "User already joined", transactionId);
     }
   });
 
   if (fire) {
+    trace("WEBHOOK", "Firing join event", { transactionId });
+
     await fireWebEngage(
       userId,
       "pass_paid_community_telegram_joined",
@@ -179,7 +237,7 @@ app.post("/telegram-webhook", async (req, res) => {
         transactionId,
         inviteLink,
         joined: true,
-        telegramUserId,
+        telegramUserId: joinedTelegramUserId,
       }
     );
   }
