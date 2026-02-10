@@ -227,20 +227,26 @@ app.post("/telegram-webhook", async (req, res) => {
     }
   });
 
-  if (fire) {
-    trace("WEBHOOK", "Firing join event", { transactionId });
+ if (fire) {
+  const finalTxnSnap = await txnRef.get();
+  const finalTelegramUserId = finalTxnSnap.data()?.telegramUserId || null;
 
-    await fireWebEngage(
-      userId,
-      "pass_paid_community_telegram_joined",
-      {
-        transactionId,
-        inviteLink,
-        joined: true,
-        telegramUserId: joinedTelegramUserId,
-      }
-    );
-  }
+  trace("WEBHOOK", "Sending join event to WebEngage", {
+    transactionId,
+    telegramUserId: finalTelegramUserId,
+  });
+
+  await fireWebEngage(
+    userId,
+    "pass_paid_community_telegram_joined",
+    {
+      transactionId,
+      inviteLink,
+      joined: true,
+      telegramUserId: finalTelegramUserId,
+    }
+  );
+}
 
   res.send("ok");
 });
