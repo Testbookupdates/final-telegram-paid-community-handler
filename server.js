@@ -67,7 +67,7 @@ async function createTelegramLink(transactionId) {
       body: JSON.stringify({
         chat_id: TELEGRAM_CHANNEL_ID,
         member_limit: 1,
-        expire_date: Math.floor(Date.now() / 1000) + 172800,
+        expire_date: Math.floor(Date.now() / 1000) + 48 * 60 * 60,
         name: `TXN:${transactionId}`.slice(0, 255),
       }),
     }
@@ -80,61 +80,7 @@ async function createTelegramLink(transactionId) {
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
-// app.post("/create-invite", async (req, res) => {
-//   const apiKey = req.header("x-api-key");
-//   const { userId, telegramUserId, transactionId } = req.body;
-
-//   if (apiKey !== STORE_API_KEY) return res.sendStatus(401);
-//   if (!userId || !telegramUserId || !transactionId)
-//     return res.sendStatus(400);
-
-//   try {
-//     const inviteLink = await createTelegramLink(transactionId);
-
-//     const inviteHash = crypto
-//       .createHash("sha256")
-//       .update(inviteLink)
-//       .digest("hex");
-
-//     const batch = db.batch();
-
-//     batch.set(db.collection(COL_TXN).doc(transactionId), {
-//       userId,
-//       telegramUserId,
-//       transactionId,
-//       inviteHash,
-//       inviteLink,
-//       joined: false,
-//       createdAt: FieldValue.serverTimestamp(),
-//     });
-
-//     batch.set(db.collection(COL_INV).doc(inviteHash), {
-//       userId,
-//       telegramUserId,
-//       transactionId,
-//       inviteLink,
-//       createdAt: FieldValue.serverTimestamp(),
-//     });
-
-//     await batch.commit();
-
-//     await fireWebEngage(
-//       userId,
-//       "pass_paid_community_telegram_link_created",
-//       {
-//         transactionId,
-//         inviteLink,
-//       }
-//     );
-
-//     res.json({ ok: true, inviteLink });
-//   } catch (err) {
-//     trace("ERROR", err.message);
-//     res.status(500).json({ ok: false });
-//   }
-// });
-
-
+/* ---------- CREATE INVITE (UPDATED) ---------- */
 app.post("/create-invite", async (req, res) => {
   const apiKey = req.header("x-api-key");
   const { userId, telegramUserId, transactionId } = req.body;
@@ -188,6 +134,7 @@ app.post("/create-invite", async (req, res) => {
   }
 });
 
+/* ---------- TELEGRAM JOIN WEBHOOK (UNCHANGED) ---------- */
 app.post("/telegram-webhook", async (req, res) => {
   if (FIRE_JOIN_EVENT !== "true") return res.send("ignored");
 
