@@ -91,15 +91,19 @@ app.post("/create-invite", async (req, res) => {
   trace("API", "create-invite called", req.body);
 
   const apiKey = req.header("x-api-key");
-  const { userId, telegramUserId, transactionId } = req.body;
+
+  // 🔽 ONLY INTENDED CHANGE STARTS HERE
+  const { userId, telegramUserId } = req.body;
+  const transactionId = req.body.transactionId || null;
+  // 🔼 ONLY INTENDED CHANGE ENDS HERE
 
   if (apiKey !== STORE_API_KEY) {
     trace("AUTH", "Invalid API key");
     return res.sendStatus(401);
   }
 
-  if (!userId || !transactionId) {
-    trace("API", "Missing required fields", { userId, transactionId });
+  if (!userId) {
+    trace("API", "Missing required fields", { userId });
     return res.sendStatus(400);
   }
 
@@ -149,8 +153,6 @@ app.post("/create-invite", async (req, res) => {
   }
 });
 
-
-
 app.post("/telegram-webhook", async (req, res) => {
   trace("WEBHOOK", "Received Telegram webhook");
 
@@ -189,7 +191,6 @@ app.post("/telegram-webhook", async (req, res) => {
   const { transactionId, userId } = inviteSnap.data();
   const txnRef = db.collection(COL_TXN).doc(transactionId);
 
-  // Use this variable to capture the ID during the transaction
   let finalTelegramUserIdToFire = null;
   let fire = false;
 
@@ -205,7 +206,6 @@ app.post("/telegram-webhook", async (req, res) => {
         joinedAt: FieldValue.serverTimestamp(),
       };
 
-      // If we don't have an ID yet, use the one from the webhook
       if (!txnData.telegramUserId) {
         update.telegramUserId = joinedTelegramUserId;
         t.update(inviteRef, { telegramUserId: joinedTelegramUserId });
@@ -232,15 +232,15 @@ app.post("/telegram-webhook", async (req, res) => {
         transactionId,
         inviteLink,
         joined: true,
-        // The fix: Explicit string casting
-        telegramUserId: finalTelegramUserIdToFire ? String(finalTelegramUserIdToFire) : null,
+        telegramUserId: finalTelegramUserIdToFire
+          ? String(finalTelegramUserIdToFire)
+          : null,
       }
     );
   }
 
   res.send("ok");
 });
-
 
 app.listen(PORT, "0.0.0.0", () =>
   trace("SYSTEM", `Listening on ${PORT}`)
