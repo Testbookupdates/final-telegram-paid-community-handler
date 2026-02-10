@@ -149,6 +149,8 @@ app.post("/create-invite", async (req, res) => {
   }
 });
 
+
+
 app.post("/telegram-webhook", async (req, res) => {
   trace("WEBHOOK", "Received Telegram webhook");
 
@@ -167,12 +169,6 @@ app.post("/telegram-webhook", async (req, res) => {
   const status = cm?.new_chat_member?.status;
   const joinedTelegramUserId = cm?.new_chat_member?.user?.id;
 
-  trace("WEBHOOK", "Parsed join", {
-    status,
-    joinedTelegramUserId,
-    hasInvite: !!inviteLink,
-  });
-
   if (
     !inviteLink ||
     !joinedTelegramUserId ||
@@ -181,11 +177,7 @@ app.post("/telegram-webhook", async (req, res) => {
     return res.send("ignored");
   }
 
-  const inviteHash = crypto
-    .createHash("sha256")
-    .update(inviteLink)
-    .digest("hex");
-
+  const inviteHash = crypto.createHash("sha256").update(inviteLink).digest("hex");
   const inviteRef = db.collection(COL_INV).doc(inviteHash);
   const inviteSnap = await inviteRef.get();
 
@@ -197,14 +189,13 @@ app.post("/telegram-webhook", async (req, res) => {
   const { transactionId, userId } = inviteSnap.data();
   const txnRef = db.collection(COL_TXN).doc(transactionId);
 
+  // Use this variable to capture the ID during the transaction
+  let finalTelegramUserIdToFire = null;
   let fire = false;
 
   await db.runTransaction(async (t) => {
     const txnSnap = await t.get(txnRef);
-    if (!txnSnap.exists) {
-      trace("TXN", "Transaction doc missing", transactionId);
-      return;
-    }
+    if (!txnSnap.exists) return;
 
     const txnData = txnSnap.data();
 
@@ -214,42 +205,42 @@ app.post("/telegram-webhook", async (req, res) => {
         joinedAt: FieldValue.serverTimestamp(),
       };
 
+      // If we don't have an ID yet, use the one from the webhook
       if (!txnData.telegramUserId) {
         update.telegramUserId = joinedTelegramUserId;
         t.update(inviteRef, { telegramUserId: joinedTelegramUserId });
-        trace("TXN", "Stored telegramUserId", joinedTelegramUserId);
+        finalTelegramUserIdToFire = joinedTelegramUserId;
+      } else {
+        finalTelegramUserIdToFire = txnData.telegramUserId;
       }
 
       t.update(txnRef, update);
       fire = true;
-    } else {
-      trace("TXN", "User already joined", transactionId);
     }
   });
 
- if (fire) {
-  const finalTxnSnap = await txnRef.get();
-  const finalTelegramUserId = finalTxnSnap.data()?.telegramUserId || null;
-
-  trace("WEBHOOK", "Sending join event to WebEngage", {
-    transactionId,
-    telegramUserId: finalTelegramUserId,
-  });
-
-  await fireWebEngage(
-    userId,
-    "pass_paid_community_telegram_joined",
-    {
+  if (fire) {
+    trace("WEBHOOK", "Sending join event to WebEngage", {
       transactionId,
-      inviteLink,
-      joined: true,
-      telegramUserId: finalTelegramUserId,
-    }
-  );
-}
+      telegramUserId: finalTelegramUserIdToFire,
+    });
+
+    await fireWebEngage(
+      userId,
+      "pass_paid_community_telegram_joined",
+      {
+        transactionId,
+        inviteLink,
+        joined: true,
+        // The fix: Explicit string casting
+        telegramUserId: finalTelegramUserIdToFire ? String(finalTelegramUserIdToFire) : null,
+      }
+    );
+  }
 
   res.send("ok");
 });
+
 
 app.listen(PORT, "0.0.0.0", () =>
   trace("SYSTEM", `Listening on ${PORT}`)
