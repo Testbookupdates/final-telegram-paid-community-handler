@@ -126,6 +126,38 @@ app.post("/v1/invite/request", async (req, res) => {
   }
 });
 
+app.get("/v1/invite/result/:requestId", async (req, res) => {
+  try {
+    const requestId = String(req.params.requestId || "").trim();
+    if (!requestId) {
+      return res.status(400).json({ ok: false, error: "requestId required" });
+    }
+
+    const snap = await db.collection("invite_requests").doc(requestId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ ok: false, error: "not found" });
+    }
+
+    const data = snap.data();
+
+    if (data.status !== "DONE") {
+      return res.json({
+        ok: true,
+        status: data.status,   // QUEUED or PROCESSING
+      });
+    }
+
+    return res.json({
+      ok: true,
+      status: "DONE",
+      inviteLink: data.inviteLink,
+    });
+
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 app.post("/v1/invite/worker", async (req, res) => {
   try {
     const requestId = String(req.body?.requestId || "").trim();
