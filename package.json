@@ -1,19 +1,11 @@
 {
-  "name": "telegram-paid-community-handler",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "name": "telegram-we-join-mapper",
+  "version": "1.1.0",
   "main": "server.js",
-  "engines": {
-    "node": "20.x"
-  },
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "@google-cloud/firestore": "^7.11.0",
-    "@google-cloud/tasks": "^5.3.0",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^2.6.7"
   }
 }
