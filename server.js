@@ -30,6 +30,19 @@ const trace = (tag, msg, data = null) => {
   );
 };
 
+/* =========================
+   ROOT (Prevents Telegram 404)
+   ========================= */
+app.post("/", (req, res) => {
+  trace("ROOT", "Hit root endpoint");
+  res.send("ok");
+});
+
+app.get("/healthz", (_, res) => res.send("ok"));
+
+/* =========================
+   WEBENGAGE
+   ========================= */
 async function fireWebEngage(userId, eventName, eventData) {
   trace("WEBENGAGE", "Firing event", { userId, eventName });
 
@@ -58,7 +71,10 @@ async function fireWebEngage(userId, eventName, eventData) {
   }
 }
 
-async function createTelegramLink(transactionId) {
+/* =========================
+   TELEGRAM INVITE CREATION
+   ========================= */
+async function createTelegramLink(transactionId, retry = 0) {
   trace("TELEGRAM", "Creating invite link", { transactionId });
 
   const res = await fetch(
@@ -76,7 +92,14 @@ async function createTelegramLink(transactionId) {
   );
 
   const data = await res.json();
+
   if (!data.ok) {
+    if (data.error_code === 429 && retry < 2) {
+      const wait = data.parameters?.retry_after || 5;
+      trace("TELEGRAM", `Rate limited. Retrying after ${wait}s`);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      return createTelegramLink(transactionId, retry + 1);
+    }
     trace("TELEGRAM", "Invite creation failed", data);
     throw new Error(data.description);
   }
@@ -85,8 +108,6 @@ async function createTelegramLink(transactionId) {
   return data.result.invite_link;
 }
 
-app.get("/healthz", (_, res) => res.send("ok"));
-
 /* =========================
    CREATE INVITE
    ========================= */
@@ -94,7 +115,6 @@ app.post("/create-invite", async (req, res) => {
   trace("API", "create-invite called", req.body);
 
   const apiKey = req.header("x-api-key");
-
   if (apiKey !== STORE_API_KEY) {
     trace("AUTH", "Invalid API key");
     return res.sendStatus(401);
@@ -103,9 +123,8 @@ app.post("/create-invite", async (req, res) => {
   const { userId, telegramUserId } = req.body;
 
   const transactionId =
-    req.body.transactionId && req.body.transactionId.trim() !== ""
-      ? req.body.transactionId
-      : `txn_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    req.body.transactionId?.trim() ||
+    `txn_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 
   if (!userId) {
     trace("API", "Missing userId");
@@ -161,37 +180,30 @@ app.post("/create-invite", async (req, res) => {
    ========================= */
 app.post("/telegram-webhook", async (req, res) => {
   trace("WEBHOOK", "Received Telegram webhook");
-  trace("WEBHOOK", "FIRE_JOIN_EVENT value", FIRE_JOIN_EVENT);
-  trace("WEBHOOK", "Full body", req.body);
 
   if (FIRE_JOIN_EVENT !== "true") {
-    trace("WEBHOOK", "Join event disabled via env");
+    trace("WEBHOOK", "Join event disabled");
     return res.send("ignored");
   }
 
   const cm = req.body.chat_member || req.body.my_chat_member;
-  if (!cm) {
-    trace("WEBHOOK", "No chat_member found");
-    return res.send("ignored");
-  }
+  if (!cm) return res.send("ignored");
 
-  const inviteLink = cm?.invite_link?.invite_link;
-  const status = cm?.new_chat_member?.status;
+  const inviteLink =
+    cm?.invite_link?.invite_link || cm?.invite_link?.link;
+
+  const newStatus = cm?.new_chat_member?.status;
+  const oldStatus = cm?.old_chat_member?.status;
+
   const joinedTelegramUserId = cm?.new_chat_member?.user?.id;
 
-  trace("WEBHOOK DEBUG", {
-    inviteLink,
-    status,
-    joinedTelegramUserId,
-  });
+  // Detect actual join transition
+  const isJoin =
+    ["member", "administrator", "creator"].includes(newStatus) &&
+    oldStatus !== newStatus;
 
-  if (!inviteLink || !joinedTelegramUserId) {
-    trace("WEBHOOK", "Missing inviteLink or userId");
-    return res.send("ignored");
-  }
-
-  if (!["member", "administrator", "creator"].includes(status)) {
-    trace("WEBHOOK", "Status not valid for join", status);
+  if (!inviteLink || !joinedTelegramUserId || !isJoin) {
+    trace("WEBHOOK", "Not valid join update");
     return res.send("ignored");
   }
 
@@ -200,47 +212,35 @@ app.post("/telegram-webhook", async (req, res) => {
   const inviteSnap = await inviteRef.get();
 
   if (!inviteSnap.exists) {
-    trace("WEBHOOK", "Invite not found in DB", inviteHash);
+    trace("WEBHOOK", "Invite not found");
     return res.send("not_found");
   }
 
   const { transactionId, userId } = inviteSnap.data();
   const txnRef = db.collection(COL_TXN).doc(transactionId);
 
-  let finalTelegramUserId = null;
   let fire = false;
+  let finalTelegramUserId = joinedTelegramUserId;
 
   await db.runTransaction(async (t) => {
     const txnSnap = await t.get(txnRef);
-    if (!txnSnap.exists) {
-      trace("WEBHOOK", "Transaction not found", transactionId);
-      return;
-    }
+    if (!txnSnap.exists) return;
 
     const txnData = txnSnap.data();
     if (!txnData.joined) {
-      finalTelegramUserId =
-        txnData.telegramUserId || joinedTelegramUserId;
-
       t.update(txnRef, {
         joined: true,
         joinedAt: FieldValue.serverTimestamp(),
         telegramUserId: finalTelegramUserId,
       });
 
-      t.update(inviteRef, {
-        telegramUserId: finalTelegramUserId,
-      });
-
       fire = true;
-      trace("WEBHOOK", "Marked as joined", transactionId);
-    } else {
-      trace("WEBHOOK", "Already joined - skipping event", transactionId);
     }
   });
 
   if (fire) {
     trace("WEBHOOK", "Firing join WebEngage event");
+
     await fireWebEngage(
       userId,
       "pass_paid_community_telegram_joined",
@@ -251,8 +251,6 @@ app.post("/telegram-webhook", async (req, res) => {
         telegramUserId: String(finalTelegramUserId),
       }
     );
-  } else {
-    trace("WEBHOOK", "Event not fired (fire=false)");
   }
 
   res.send("ok");
